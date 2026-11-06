@@ -37,6 +37,9 @@ def setup_logging(level: str = None, stream=sys.stderr) -> None:
         return
 
     root = logging.getLogger()
+    # 清掉 get_logger 兜底 basicConfig 可能已挂的 handler, 否则每条日志打印两遍
+    for h in list(root.handlers):
+        root.removeHandler(h)
     root.setLevel(getattr(logging, (level or _DEFAULT_LEVEL), logging.INFO))
 
     handler = logging.StreamHandler(stream)
