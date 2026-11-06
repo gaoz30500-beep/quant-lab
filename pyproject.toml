@@ -32,6 +32,7 @@ py-modules = [
     "trend_forecast", "fund_rules_backtest", "fund_batch",
     "portfolio", "compare", "etf_portfolio", "capital_scaling",
     "optimize_trend", "optimize_steady", "validate_trend",
+    "clean_cache",
 ]
 
 # ---- ruff ----

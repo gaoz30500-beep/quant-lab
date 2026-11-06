@@ -5,9 +5,10 @@
 
 ## 环境
 
-- Python 3.11（本机为 `C:\Users\budel\AppData\Local\Programs\Python\Python311\python.exe`）
-- 依赖：`pip install -r requirements.txt`
-- 数据缓存目录 `data/cache/`，结果目录 `results/`
+- Python ≥ 3.9（开发机为 3.11）
+- 依赖：`pip install -r requirements.txt`，或可安装方式 `pip install -e .`（提供 `quant` 命令）
+- 数据缓存目录 `data/cache/`、结果目录 `results/` 均为本地生成，不入库（见 `.gitignore`）
+- 日志级别：环境变量 `QUANT_LOG_LEVEL=DEBUG`（默认 INFO；诊断走 stderr，报告走 stdout）
 
 ## 常用命令
 
@@ -67,12 +68,14 @@ PortfolioEngine(data_with_history, factory, config,
 | `risk.py` | 仓位与风控 |
 | `metrics.py` | 绩效指标 |
 | `portfolio.py` / `optimize_*.py` / `validate_trend.py` / `etf_portfolio.py` / `capital_scaling.py` / `fund_rules_backtest.py` | 回测与研究报告脚本 |
-| `tests/` | 合成数据 golden master + 规则单测 |
+| `logging_setup.py` | 统一分级日志（入口调 `setup_logging()`，模块用 `get_logger(__name__)`） |
+| `clean_cache.py` | 缓存清理工具（`--symbol` 过滤 / `--dry-run` 预览） |
+| `tests/` | 合成数据 golden master + 规则单测 + 数据层边界测试（41 个，全离线） |
+| `research/` | **未接入主链路**的实验模块（见其 README，勿从主链路 import） |
+| `archive/` | 历史废弃脚本（仅存档，git 历史可追溯） |
 
-**未接入主链路**（历史遗留，主链路不 import，也未被任何脚本引用）：
-`monitoring_system.py`、`strategy_validator.py`、`trading_system.py`、`data_manager.py`、
-`engine_optimized.py`、`risk_enhanced.py`。
-其中 `engine_optimized.py` 按收盘价成交且没有涨跌停判断，**不要**把它当作 `engine.py` 的升级版。
+`research/` 中 `engine_optimized.py` 按收盘价成交且没有涨跌停判断，**不要**把它当作
+`engine.py` 的升级版；其余模块状态见 `research/README.md` 的逐文件标注。
 
 ## 测试
 
@@ -80,14 +83,19 @@ PortfolioEngine(data_with_history, factory, config,
 python -m unittest discover -s tests -v
 ```
 
-测试用完全确定性的合成行情，覆盖：涨跌停判定、脏数据修正、"破 MA60 走/回 MA20 进"的
-离场优先级、组合回测的 golden master（总收益/回撤/笔数/逐笔盈亏口径）、以及
-预热窗口与评估窗口的分离。
+测试用完全确定性的合成行情 + mock（全离线，CI 可直接跑），覆盖：
+
+- 引擎口径：涨跌停判定、"破 MA60 走/回 MA20 进"的离场优先级、组合回测
+  golden master（总收益/回撤/笔数/逐笔盈亏口径）、预热窗口与评估窗口分离
+- 数据层边界：`validate_daily` 只报告不擅改、重试与指数退避、盘中半根 K 线丢弃、
+  缓存新鲜度判定（无 stamp/过期/当日已查/stamp 损坏）
+- 基金降级：`get_nav` 三级策略（新鲜缓存不触网 / 网络失败降级旧缓存 / 无缓存抛带代码的错）
+
+CI：push/PR 触发 GitHub Actions（`.github/workflows/tests.yml`）。
 
 ## 已知限制
 
 - ST/*ST 的 5% 涨跌幅限制未建模（需要股票名称数据，仅凭代码无法判定）。
 - 分红送股只体现在复权价格里，没有单独的现金分红流水与再投资时点。
 - 基准为等权买入持有，未做行业中性或市值加权基准。
-- 无 CI，测试本地跑；参数网格仍是网格搜索 + 双段一致性，未做正式 walk-forward 再拟合。
-# quant-lab
+- 参数网格仍是网格搜索 + 双段一致性，未做正式 walk-forward 再拟合。
