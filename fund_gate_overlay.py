@@ -100,27 +100,25 @@ def build_weights(nav_panel: pd.DataFrame, dates) -> pd.DataFrame:
     return eff
 
 
-def main():
-    setup_logging()
-    print('=' * 84)
-    print('分散组合 + 类别级 MA60/MA20 闸门 (正证据组合实验)')
-    print(f'评估: {EVAL_START} 起   基准: 10只基金动态等权买入持有')
-    print('=' * 84)
+def compute(nav_panel: pd.DataFrame = None) -> dict:
+    """
+    核心计算 (供 main 与 frozen_protocol 复用)
 
-    navs = {}
-    for cat, codes in CATEGORIES.items():
-        for code in codes:
-            try:
-                navs[code] = get_nav(code)
-            except Exception as e:
-                logger.error('%s 获取失败: %s', code, e)
-    nav_panel = pd.DataFrame(navs).sort_index()
-    print(f'净值面板: {nav_panel.shape[0]} 天 x {nav_panel.shape[1]} 只')
+    返回: equity, bench, m(策略指标), bm(基准指标), yt(分年度), nav_panel
+    """
+    if nav_panel is None:
+        navs = {}
+        for cat, codes in CATEGORIES.items():
+            for code in codes:
+                try:
+                    navs[code] = get_nav(code)
+                except Exception as e:
+                    logger.error('%s 获取失败: %s', code, e)
+        nav_panel = pd.DataFrame(navs).sort_index()
 
     dates = nav_panel.index[nav_panel.index >= pd.Timestamp(EVAL_START)]
     rets = nav_panel.pct_change()
 
-    # ---- 策略 ----
     eff_w = build_weights(nav_panel, dates)
     eq, equity = 1.0, pd.Series(index=dates, dtype=float)
     for d in dates:
@@ -132,7 +130,6 @@ def main():
         eq *= (1 + daily)
         equity.loc[d] = eq
 
-    # ---- 基准 (与 fund_rotation 完全相同) ----
     avail = nav_panel.notna()
     bench_ret = (rets.fillna(0.0) - SERVICE_FEE / 252).mul(avail).sum(axis=1) / avail.sum(axis=1)
     bench_ret = bench_ret[bench_ret.index >= pd.Timestamp(EVAL_START)].fillna(0.0)
@@ -142,6 +139,21 @@ def main():
     m = Metrics.calc_all(equity, [], risk_free_rate=CASH_YIELD)
     bm = Metrics.calc_all(bench, [], risk_free_rate=CASH_YIELD)
     yt = yearly_table(equity, bench)
+    return {'equity': equity, 'bench': bench, 'm': m, 'bm': bm,
+            'yt': yt, 'nav_panel': nav_panel}
+
+
+def main():
+    setup_logging()
+    print('=' * 84)
+    print('分散组合 + 类别级 MA60/MA20 闸门 (正证据组合实验)')
+    print(f'评估: {EVAL_START} 起   基准: 10只基金动态等权买入持有')
+    print('=' * 84)
+
+    res = compute()
+    nav_panel, equity, bench = res['nav_panel'], res['equity'], res['bench']
+    m, bm, yt = res['m'], res['bm'], res['yt']
+    print(f'净值面板: {nav_panel.shape[0]} 天 x {nav_panel.shape[1]} 只')
 
     print('\n' + '=' * 84)
     print('结果')
