@@ -10,9 +10,8 @@ venv/
 # 本地行情缓存 (可再生, 不入库; 缓存新鲜度由 .stamp 文件本地判定)
 data/cache/
 
-# 回测输出 (本地生成)
-results/*.png
-results/*.csv
+# 回测输出 (本地生成: 图表/明细/实验快照)
+results/
 
 # 工具/IDE
 .idea/
