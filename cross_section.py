@@ -45,11 +45,45 @@ logger = get_logger('cross_section')
 UNIVERSE_INDEX = '000300'      # 股票池 = 沪深300 成分
 DATA_START = '20170101'        # 因子预热 2 年
 EVAL_START = '2019-01-01'      # 评估起点
-TOP_N = 30                     # 持仓数
+TOP_N = 30                     # 持仓数 (迭代1)
 REBALANCE_DAYS = 21            # 月度调仓 (交易日)
 COST_RATE = 0.0026             # 单边合计成本 x 换手率
 MIN_BARS = 250                 # 入选池子的最少K线数
 FACTOR_NAMES = ['mom_120_20', 'rev_5', 'low_vol_60']
+
+# ---- 迭代2 预注册 (2026-11-06, 迭代1结果出来后、跑迭代2之前写死) ----
+# 迭代1 (TOP_N=30) 诊断: IR 0.27 弱, TE 11.4% 过高 (30只等权=风格暴露而非纯alpha),
+#   2024/2025 超额为负 (因子近年衰减)。
+# 迭代2 修正: TOP_N 30 -> 100 (分散个股噪声, TE 应向真正指增收敛), 其余全不动。
+# 采纳线 (先写死后跑, 全过才进入下一步研究, 任一不过即停止该方向):
+#   P1 超额为正年份 >= 5/8
+#   P2 信息比率 IR >= 0.3
+#   P3 跟踪误差 TE <= 8%
+#   P4 2024+2025+2026 三年超额合计 > -5% (近年不能持续失血)
+# 迭代2 结果 (2026-11-06): 3/4 → 按规则否决。P1 7/8 PASS, P2 IR=0.70 PASS,
+#   P4 -4.03% PASS, P3 TE=8.66% FAIL (差 0.66pp)。
+#   诊断: TE 超标是"等权 vs 市值加权"的结构性风格偏差, 非因子失效;
+#   2025 单年超额 -11.58% 是主要风险点 (因子拥挤/衰减), 如实记录。
+ITER2_TOP_N = 100
+
+# ---- 迭代3 预注册 (2026-11-06, 迭代2否决后、跑迭代3之前写死) ----
+# 修正对象: 迭代2 唯一失败项 P3 (结构性 TE)。因子/池/调仓/成本全不动。
+# 唯一变更: 权重从等权 -> 反波动率加权 (w ∝ 1/vol60, vol 用 T-1 前数据),
+#   单票上限 = 2x 等权 (防集中)。零拟合参数 (60日窗口与 low_vol_60 因子同源)。
+# 采纳线: 沿用 P1-P4 原值不改 (改阈值=移动球门, 禁止)。
+# 多重检验披露: 这是同一家族的第 3 次尝试, 假阳性风险随迭代上升;
+#   若过线, 采纳前还需一次"冻结协议"复核 (换随机种子无关, 但要看 2025 年
+#   单年超额是否仍 < -8% —— 若是, 视为因子衰减证据, 降级为研究观察仓)。
+# 迭代3 结果 (2026-11-06): 3/4 → 否决, 且全面弱于迭代2 (年化 9.85% vs 11.51%,
+#   IR 0.41 vs 0.70, 超额为正 5/8 vs 7/8, TE 10.10% vs 8.66% 反而更高)。
+#   诊断: 低波倾斜本身就是相对市值加权基准的风格赌注, 2019/2020 牛市跑输;
+#   无市值数据做真正的权重优化, TE<=8% 在此工具链下结构性不可达。
+#   结论: 按纪律停止该方向, 三次迭代全部如实归档 (results/cross_section_*.json)。
+#   首跑还抓到并修复一个实现 bug: 先 clip 后归一会让 invvol 静默退化为等权
+#   (回归测试 tests/test_cross_section.py 守护)。
+ITER3_WEIGHTING = 'invvol'
+ITER3_SINGLE_CAP_X = 2.0        # 单票权重上限 = 2x 等权
+ITER3_VOL_WINDOW = 60
 
 RESULTS_DIR = Path(__file__).parent / 'results'
 
@@ -111,16 +145,50 @@ def factor_scores(close: pd.DataFrame) -> pd.DataFrame:
     return score
 
 
+def _invvol_weights(top, vol_row: pd.Series, cap: float) -> pd.Series:
+    """
+    反波动率权重: w ∝ 1/vol, 单票封顶 cap, 迭代 clip+归一直到全部达标
+
+    vol 缺失的票用中位权重兜底 (预热期后极少发生); 全缺则退化为等权。
+    """
+    v = vol_row.reindex(top)
+    w = 1.0 / v.where(v > 0)
+    w = w.dropna()
+    if len(w) == 0:
+        out = pd.Series(1.0 / len(top), index=top)
+        return out
+    missing = [c for c in top if c not in w.index]
+    if missing:
+        med = float(w.median())
+        for c in missing:
+            w[c] = med
+    # 必须先归一再封顶: 1/vol 原始量纲远大于是 cap, 先 clip 会把所有票削平=等权
+    # (2026-11-06 实际踩过: 迭代3首跑结果与迭代2逐位相同, 即此 bug)
+    w = w / w.sum()
+    for _ in range(20):                      # 封顶 -> 归一, 水床效应收敛为止
+        if float(w.max()) <= cap + 1e-9:
+            break
+        w = w.clip(upper=cap)
+        w = w / w.sum()
+    return w
+
+
 def backtest(close: pd.DataFrame, score: pd.DataFrame,
-             bench: pd.Series) -> dict:
+             bench: pd.Series, top_n: int = TOP_N,
+             weighting: str = 'equal') -> dict:
     """
     月度调仓截面回测 (向量化近似)
 
     T-1 收盘得分 -> T 日持仓生效; 持有期内按"每日等权再平衡"近似
     (月度内权重漂移 <3%, 近似误差远小于因子噪声, 已披露)
+
+    weighting: 'equal' 等权 (迭代1/2) | 'invvol' 反波动率+单票封顶 (迭代3, 预注册)
     """
     ret = close.pct_change().fillna(0.0)
     score_lag = score.shift(1)                # 关键: 得分滞后一天, 无未来函数
+    vol_lag = None
+    if weighting == 'invvol':
+        vol_lag = close.pct_change().rolling(ITER3_VOL_WINDOW).std().shift(1)
 
     dates = close.index[close.index >= pd.Timestamp(EVAL_START)]
     if len(dates) < REBALANCE_DAYS * 3:
@@ -135,10 +203,15 @@ def backtest(close: pd.DataFrame, score: pd.DataFrame,
     for k, d in enumerate(dates):
         if k % REBALANCE_DAYS == 0:
             s = score_lag.loc[d].dropna()
-            if len(s) >= TOP_N:
-                top = s.nlargest(TOP_N).index
+            if len(s) >= top_n:
+                top = s.nlargest(top_n).index
                 weights_now = pd.Series(0.0, index=close.columns)
-                weights_now[top] = 1.0 / len(top)
+                if weighting == 'invvol':
+                    cap = ITER3_SINGLE_CAP_X / len(top)
+                    w = _invvol_weights(top, vol_lag.loc[d], cap)
+                    weights_now[w.index] = w.values
+                else:
+                    weights_now[top] = 1.0 / len(top)
             # 得分不足 (早期预热) 时保持原权重
             turnover = float((weights_now - prev_w).abs().sum()) if prev_w is not None else float(weights_now.sum())
             turnover_sum += turnover
@@ -192,13 +265,19 @@ def yearly_table(equity: pd.Series, bench: pd.Series) -> pd.DataFrame:
 def main():
     ap = argparse.ArgumentParser(description='截面多因子选股回测 (指数增强风格)')
     ap.add_argument('--limit', type=int, default=None, help='只用前 N 只 (冒烟)')
+    ap.add_argument('--top-n', type=int, default=TOP_N,
+                    help=f'持仓数 (默认 {TOP_N}; 迭代2/3 预注册为 {ITER2_TOP_N})')
+    ap.add_argument('--weighting', choices=['equal', 'invvol'], default='equal',
+                    help='权重方案: equal 等权 / invvol 反波动率+封顶 (迭代3 预注册)')
     ap.add_argument('--no-fetch-bench', action='store_true')
     args = ap.parse_args()
     setup_logging()
 
+    top_n = args.top_n
     print('=' * 88)
     print(f'截面多因子选股  池=沪深300当前成分(幸存者偏差已披露)  因子={"+".join(FACTOR_NAMES)} 等权')
-    print(f'调仓=每{REBALANCE_DAYS}交易日  持仓=前{TOP_N}等权  成本=换手x{COST_RATE:.2%}  评估={EVAL_START}起')
+    print(f'调仓=每{REBALANCE_DAYS}交易日  持仓=前{top_n} ({args.weighting})  '
+          f'成本=换手x{COST_RATE:.2%}  评估={EVAL_START}起')
     print('=' * 88)
 
     ds = DataSource(use_cache=True)
@@ -216,7 +295,7 @@ def main():
     bench = idx['close']
 
     score = factor_scores(close)
-    out = backtest(close, score, bench)
+    out = backtest(close, score, bench, top_n=top_n, weighting=args.weighting)
 
     m, bm, ex = out['strategy'], out['benchmark'], out['excess']
     print('\n' + '=' * 88)
@@ -242,15 +321,36 @@ def main():
     pos_years = int((yt['excess'] > 0).sum())
     print(f"  超额为正年份: {pos_years}/{len(yt)}")
 
+    # ---- 迭代3 采纳线判定 (预注册 P1-P4 原值, 见文件头) ----
+    adoption = None
+    if top_n == ITER2_TOP_N and args.weighting == ITER3_WEIGHTING:
+        recent = yt[yt['year'] >= 2024]['excess'].sum()
+        y2025 = yt[yt['year'] == 2025]['excess']
+        adoption = {
+            'P1_超额为正年份>=5/8': bool(pos_years >= 5),
+            'P2_IR>=0.3': bool(ex['information_ratio'] >= 0.3),
+            'P3_TE<=8%': bool(ex['tracking_error'] <= 0.08),
+            'P4_2024起三年超额合计>-5%': bool(recent > -0.05),
+        }
+        print('\n迭代3 采纳线 (预注册, 阈值与迭代2相同):')
+        for k, v in adoption.items():
+            print(f"  {k:<28}: {'PASS' if v else 'FAIL'}")
+        n_ok = sum(adoption.values())
+        verdict = '[采纳] 进入冻结协议复核' if n_ok == len(adoption) else '[否决] 停止该方向, 结果如实归档'
+        print(f'  判定: {verdict} ({n_ok}/{len(adoption)})')
+        print(f'  2024起超额合计: {recent:+.2%}   2025单年超额: '
+              f'{float(y2025.iloc[0]):+.2%}' if len(y2025) else '')
+
     # 落盘
     RESULTS_DIR.mkdir(exist_ok=True)
-    tag = f'limit{args.limit}' if args.limit else 'hs300'
+    tag = f'limit{args.limit}' if args.limit else f'hs300_top{top_n}_{args.weighting}'
     pd.DataFrame({'equity': out['equity'], 'benchmark': out['bench']}).to_csv(
         RESULTS_DIR / f'cross_section_{tag}_equity.csv', encoding='utf-8-sig')
     payload = {
         'created_at': datetime.now().isoformat(timespec='seconds'),
         'universe': f'{UNIVERSE_INDEX} 当前成分 x{close.shape[1]} (幸存者偏差已披露)',
-        'preregistered': {'factors': FACTOR_NAMES, 'top_n': TOP_N,
+        'preregistered': {'factors': FACTOR_NAMES, 'top_n': top_n,
+                          'weighting': args.weighting,
                           'rebalance_days': REBALANCE_DAYS, 'cost_rate': COST_RATE,
                           'eval_start': EVAL_START},
         'strategy_metrics': {k: float(v) for k, v in m.items()},
@@ -258,6 +358,7 @@ def main():
         'excess': {k: float(v) for k, v in ex.items()},
         'yearly': yt.to_dict('records'),
         'excess_positive_years': f'{pos_years}/{len(yt)}',
+        'iter2_adoption': adoption,
     }
     (RESULTS_DIR / f'cross_section_{tag}.json').write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
