@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-trading"
+version = "0.1.0"
+description = "A股量化研究框架: 回测引擎 / 组合回测 / 趋势预测 / 基金规则回测"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=1.5.0",
+    "numpy>=1.23.0",
+    "matplotlib>=3.6.0",
+    "akshare>=1.10.0",
+]
+
+[project.optional-dependencies]
+# 未接入主链路的研究模块所需依赖
+research = ["scipy", "seaborn", "plotly", "statsmodels"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+quant = "main:main"
+
+# ---- 打包: 平铺布局, 显式列出主链路模块 + strategies 包 ----
+[tool.setuptools]
+packages = ["strategies"]
+py-modules = [
+    "main", "config", "engine", "portfolio_engine", "risk", "metrics",
+    "data_source", "data_loader", "plotting", "logging_setup",
+    "market_state", "market_gate", "optimizer",
+    "trend_forecast", "fund_rules_backtest", "fund_batch",
+    "portfolio", "compare", "etf_portfolio", "capital_scaling",
+    "optimize_trend", "optimize_steady", "validate_trend",
+]
+
+# ---- ruff ----
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # 行宽交给 formatter
+    "B008",  # 函数默认值调用 (dataclass 场景常见)
+]
+
+# ---- pytest ----
+[tool.pytest.ini_options]
+testpaths = ["tests"]

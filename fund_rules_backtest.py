@@ -19,6 +19,9 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 from metrics import Metrics
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 CACHE_DIR = Path(__file__).parent / 'data' / 'cache'
 RESULTS_DIR = Path(__file__).parent / 'results'
@@ -53,22 +56,47 @@ def _expected_nav_date() -> date:
 
 
 def get_nav(code: str) -> pd.Series:
-    """带 CSV 缓存的基金净值; 缓存已含应公布的最新净值才复用, 否则重拉"""
+    """
+    带 CSV 缓存的基金净值; 缓存已含应公布的最新净值才复用, 否则重拉
+
+    失败策略 (商业化口径):
+    - 缓存损坏/为空 → 忽略缓存, 走网络重拉, 不中断
+    - 网络拉取失败但本地有旧缓存 → 降级用旧缓存并 WARNING (数据滞后好过整批失败)
+    - 网络失败且无缓存 → 抛出带基金代码的明确异常, 由上层按只跳过
+    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CACHE_DIR / f'fund_{code}.csv'
     expected = _expected_nav_date()
+
+    cached = None
     if path.exists():
-        df = pd.read_csv(path, parse_dates=['date'], index_col='date')
-        if len(df) > 0 and df.index[-1].date() >= expected:
-            return df['nav'].dropna()
-        print(f'[数据] {code} 缓存最新 {df.index[-1].date()} < 应为 {expected}, 重新拉取')
-    df = ak.fund_open_fund_info_em(symbol=code, indicator='单位净值走势')
-    df['净值日期'] = pd.to_datetime(df['净值日期'])
-    df = df.sort_values('净值日期').set_index('净值日期')
-    nav = pd.to_numeric(df['单位净值'], errors='coerce').dropna()
-    nav.rename('nav').rename_axis('date').to_csv(path, encoding='utf-8-sig')
-    time.sleep(0.8)
-    return nav
+        try:
+            df = pd.read_csv(path, parse_dates=['date'], index_col='date')
+            nav = df['nav'].dropna()
+            if len(nav) > 0:
+                if nav.index[-1].date() >= expected:
+                    return nav
+                logger.info('%s 缓存最新 %s < 应为 %s, 重新拉取', code, nav.index[-1].date(), expected)
+                cached = nav
+        except Exception as e:
+            logger.warning('%s 缓存损坏 (%s), 忽略并重新拉取', code, e)
+
+    try:
+        df = ak.fund_open_fund_info_em(symbol=code, indicator='单位净值走势')
+        df['净值日期'] = pd.to_datetime(df['净值日期'])
+        df = df.sort_values('净值日期').set_index('净值日期')
+        nav = pd.to_numeric(df['单位净值'], errors='coerce').dropna()
+        if len(nav) == 0:
+            raise ValueError('接口返回空净值序列')
+        nav.rename('nav').rename_axis('date').to_csv(path, encoding='utf-8-sig')
+        time.sleep(0.8)
+        return nav
+    except Exception as e:
+        if cached is not None and len(cached) > 0:
+            logger.warning('%s 拉取失败 (%s), 降级使用旧缓存至 %s',
+                           code, str(e)[:80], cached.index[-1].date())
+            return cached
+        raise RuntimeError(f'基金 {code} 净值获取失败且无可用缓存: {e}') from e
 
 
 # ---------- 预注册规则: 返回目标仓位序列 (0 或 1), 按 T 日净值计算 ----------
@@ -193,14 +221,21 @@ def run_fund_rules():
     print('基金规则回测  (预注册6条规则, T+1/T+2净值成交, C类费率: 申购0/赎回<7天1.5%/服务费0.4%年, 空仓1.5%年)')
     print('=' * 100)
 
+    MIN_NAV_LEN = 70   # MA60 规则需要至少 60 根预热 + 若干评估点
     navs = {}
     for code, name, ftype in FUNDS:
         try:
-            navs[code] = get_nav(code)
-            print(f'[数据] {code} {name}: {len(navs[code])}条, '
-                  f'{navs[code].index[0].date()} ~ {navs[code].index[-1].date()}')
+            nav = get_nav(code)
         except Exception as e:
-            print(f'[数据] {code} {name}: 获取失败 {type(e).__name__}: {e}')
+            logger.error('%s %s: 获取失败 %s: %s', code, name, type(e).__name__, e)
+            continue
+        if len(nav) < MIN_NAV_LEN:
+            logger.warning('%s %s: 净值仅%d条 (< %d), 指标预热不足, 跳过',
+                           code, name, len(nav), MIN_NAV_LEN)
+            continue
+        navs[code] = nav
+        print(f'[数据] {code} {name}: {len(nav)}条, '
+              f'{nav.index[0].date()} ~ {nav.index[-1].date()}')
 
     rows = []
     for code, name, ftype in FUNDS:

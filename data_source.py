@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 from datetime import datetime, timedelta, date
 
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 
 def validate_daily(
     df: pd.DataFrame,
@@ -122,7 +126,7 @@ class DataSource:
 
         # 数据源2: 新浪 (stock_zh_a_daily) — 需加市场前缀
         if df is None or df.empty:
-            print("[数据源] 东方财富失败，切换至新浪源...")
+            logger.warning("股票 %s: 东方财富失败, 切换至新浪源", symbol)
             sina_symbol = self._add_market_prefix(symbol)
             df = self._request_with_retry(
                 'stock_zh_a_daily',
@@ -174,10 +178,10 @@ class DataSource:
                     'pct_change': float(r.get('涨跌幅', 0)),
                 }
         except Exception as e:
-            print(f"[实时行情] 东方财富获取失败: {str(e)[:60]}")
+            logger.warning("实时行情 %s: 东方财富获取失败: %s", symbol, str(e)[:60])
 
         # 数据源2: 新浪 HTTP 直连 (单只股票，轻量快速)
-        print("[实时行情] 切换至新浪直连接口...")
+        logger.info("实时行情 %s: 切换至新浪直连接口", symbol)
         return self._sina_realtime_quote(symbol)
 
     def _sina_realtime_quote(self, symbol: str) -> Optional[dict]:
@@ -219,7 +223,7 @@ class DataSource:
                 'pct_change': pct_change,
             }
         except Exception as e:
-            print(f"[实时行情] 新浪直连获取失败: {e}")
+            logger.error("实时行情 %s: 新浪直连获取失败: %s", symbol, e)
             return None
 
     def get_index_daily(
@@ -253,7 +257,7 @@ class DataSource:
 
         # 数据源2: 新浪 (需加 sh/sz 前缀，指数用 sh)
         if df is None or df.empty:
-            print("[数据源] 东方财富指数接口失败，切换至新浪源...")
+            logger.warning("指数 %s: 东方财富接口失败, 切换至新浪源", symbol)
             # 指数前缀: 上证指数 000001 → sh, 深证成指 399001 → sz
             sina_symbol = f'sz{symbol}' if symbol.startswith('399') else f'sh{symbol}'
             df = self._request_with_retry(
@@ -301,7 +305,7 @@ class DataSource:
 
         # 数据源2: 东方财富
         if df is None or df.empty:
-            print(f"[数据源] ETF {symbol} 新浪接口失败，切换至东方财富...")
+            logger.warning("ETF %s: 新浪接口失败, 切换至东方财富", symbol)
             df = self._request_with_retry(
                 'fund_etf_hist_em', symbol=symbol, period='daily',
                 start_date=s, end_date=e, adjust='qfq',
@@ -336,7 +340,8 @@ class DataSource:
                 if df is not None and not df.empty:
                     return df
             except Exception as e:
-                print(f"[数据源] {func_name} 第{attempt}次请求失败: {e}")
+                logger.warning("%s 第%d/%d次请求失败: %s",
+                               func_name, attempt, self.max_retries, e)
                 if attempt < self.max_retries:
                     time.sleep(2 * attempt)  # 指数退避
         return None
@@ -440,13 +445,14 @@ class DataSource:
         last_bar = df.index.max()
         expected = self._expected_bar_date(end_date)
         if self._is_cache_fresh(path, last_bar, expected):
-            print(f"[缓存] 读取 {symbol} (最新K线 {last_bar.date()}, 应为 {expected})")
+            logger.info("缓存命中 %s (最新K线 %s, 应为 %s)", symbol, last_bar.date(), expected)
             return df
 
         if last_bar.date() >= expected:
-            print(f"[缓存] {symbol} 需更新 (当日K线可能未收盘), 重新拉取")
+            logger.info("缓存 %s 需更新 (当日K线可能未收盘), 重新拉取", symbol)
         else:
-            print(f"[缓存] {symbol} 已过期 (最新K线 {last_bar.date()} < 应为 {expected}), 重新拉取")
+            logger.info("缓存 %s 已过期 (最新K线 %s < 应为 %s), 重新拉取",
+                        symbol, last_bar.date(), expected)
         return None
 
     def _save_cache(self, df: pd.DataFrame, symbol, start_date, end_date, adjust):
@@ -455,9 +461,9 @@ class DataSource:
             df.to_csv(path, encoding='utf-8-sig')
             if len(df) > 0:
                 self._write_stamp(path, df.index.max())
-            print(f"[缓存] 保存 {symbol} -> {path.name}")
+            logger.info("缓存保存 %s -> %s", symbol, path.name)
         except Exception as e:
-            print(f"[缓存] 保存失败: {e}")
+            logger.warning("缓存保存失败 %s: %s", symbol, e)
 
     # ---------- 缓存新鲜度判定 ----------
 
@@ -508,7 +514,7 @@ class DataSource:
                 'last_bar_date': str(pd.Timestamp(last_bar).date()),
             }, ensure_ascii=False), encoding='utf-8')
         except Exception as e:
-            print(f"[缓存] 标记写入失败: {e}")
+            logger.warning("缓存标记写入失败 %s: %s", cache_path.name, e)
 
     @staticmethod
     def _parse_check_time(stamp: dict) -> Optional[datetime]:

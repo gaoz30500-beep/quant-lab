@@ -11,6 +11,10 @@ import akshare as ak
 import pandas as pd
 import numpy as np
 
+from logging_setup import get_logger
+
+logger = get_logger(__name__)
+
 
 FUNDS = [
     ('014409', '创金合信兴选产业趋势', 'A股权益'),
@@ -33,10 +37,12 @@ def get_nav(code):
             df['净值日期'] = pd.to_datetime(df['净值日期'])
             df = df.sort_values('净值日期').set_index('净值日期')
             c = pd.to_numeric(df['单位净值'], errors='coerce').dropna()
+            if len(c) == 0:
+                raise ValueError('接口返回空净值序列')
             return c
         except Exception as e:
             if i == 1:
-                print(f"    {code} 获取失败: {str(e)[:60]}")
+                logger.error('%s 净值获取失败 (已重试): %s', code, str(e)[:80])
             time.sleep(1.5)
     return None
 

@@ -235,10 +235,18 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-if __name__ == '__main__':
+def main():
+    """包入口 (pyproject [project.scripts]): 先配置日志, 再分发子命令"""
+    from logging_setup import setup_logging
+    setup_logging()
+
     parser = build_parser()
     args = parser.parse_args()
     if not getattr(args, 'command', None):
         parser.print_help()
     else:
         args.func(args)
+
+
+if __name__ == '__main__':
+    main()

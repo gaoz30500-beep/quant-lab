@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 本地行情缓存 (可再生, 不入库; 缓存新鲜度由 .stamp 文件本地判定)
+data/cache/
+
+# 回测输出 (本地生成)
+results/*.png
+results/*.csv
+
+# 工具/IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 日志
+*.log
