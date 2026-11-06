@@ -65,7 +65,8 @@ PROD_FAST, PROD_SLOW = 20, 150
 #    披露: 黄金 2023-2026 走强是事后已知信息, 存在选择偏差; 因此验收同时看
 #    滚动 4 段 (覆盖 2018-2022 黄金平淡期), 4 段一致性不过即否决 (并入 B2)。
 #    混合口径: 两腿各自归一后按 85/15 加权, 不再平衡 (年度漂移 <2pp, 忽略)。
-# 验收: 沿用同一闸门 8 项标准, 阈值不变。
+# L1L2 首跑结果: 7/8 通过 (样本外年化 5.82%, 回撤 10.22%, 4段全正最差+8.20%,
+#    超额基准 +9.80pp), 仅 C1 未达线。
 PROD_CASH_YIELD = 0.03
 GOLD_ETF = '518880'
 GOLD_WEIGHT = 0.15
@@ -82,16 +83,22 @@ LIMITS = {
 }
 
 
-def check_unit_tests() -> bool:
-    """A1: 单元测试全绿"""
-    proc = subprocess.run(
-        [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests'],
-        capture_output=True, text=True, cwd=Path(__file__).parent,
-    )
-    ok = proc.returncode == 0
-    if not ok:
-        logger.error('单元测试失败:\n%s', proc.stderr[-2000:])
-    return ok
+# ================= 共享构建函数 (gate 与 global_blend 复用) =================
+
+def load_experiment_data():
+    """加载股票池 + 指数 (预热数据自 HISTORY_START)"""
+    data = load_pool(DEFAULT_POOL, start_date=HISTORY_START)
+    g = MarketGate(ma_window=20, min_return=-0.05, use_momentum_filter=True)
+    idx = g.load_index_data(start_date=HISTORY_START)
+    if idx is None or len(data) < 8:
+        raise RuntimeError(f'数据不足 (股票 {len(data)} 只, '
+                           f'指数 {"无" if idx is None else "有"})')
+    return data, idx
+
+
+def load_gold() -> pd.Series:
+    gold = DataSource(use_cache=True).get_etf_daily(GOLD_ETF, start_date=HISTORY_START)
+    return gold['close']
 
 
 def blend_with_gold(eq: pd.Series, gold_close: pd.Series, w: float) -> pd.Series:
@@ -122,6 +129,48 @@ def blend_metrics(m: dict, eq_blended: pd.Series) -> dict:
             'calmar_ratio': mb['calmar_ratio']}
 
 
+def run_l1l2(data, idx, gold_close, start=None, end=None, variant='l1l2'):
+    """
+    统一回测入口: 按变体决定现金收益与是否混合黄金腿
+
+    variant: base (现金2%无底仓) / l1 (现金3%) / l1l2 (现金3%+黄金15%)
+    """
+    cash_yield = PROD_CASH_YIELD if variant in ('l1', 'l1l2') else 0.02
+    use_gold = variant == 'l1l2'
+    m, eq = run(data, idx, PROD_FAST, PROD_SLOW, start, end,
+                cash_yield=cash_yield, return_equity=True)
+    if use_gold:
+        eq = blend_with_gold(eq, gold_close, GOLD_WEIGHT)
+        m = blend_metrics(m, eq)
+    return m, eq
+
+
+def rolling_folds(data, idx, gold_close, variant='l1l2', n_folds=4):
+    """滚动 4 段 (段边界取自 2018 起的评估区间, 与 validate_trend 一致)"""
+    eval_dates = [d for d in idx.index if d >= pd.Timestamp('2018-01-01')]
+    n = len(eval_dates)
+    folds = []
+    for i in range(n_folds):
+        s = eval_dates[i * n // n_folds]
+        e = eval_dates[min((i + 1) * n // n_folds - 1, n - 1)]
+        fm, _ = run_l1l2(data, idx, gold_close, s, e, variant=variant)
+        folds.append({'start': str(pd.Timestamp(s).date()),
+                      'end': str(pd.Timestamp(e).date()), **fm})
+    return folds
+
+
+def check_unit_tests() -> bool:
+    """A1: 单元测试全绿"""
+    proc = subprocess.run(
+        [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests'],
+        capture_output=True, text=True, cwd=Path(__file__).parent,
+    )
+    ok = proc.returncode == 0
+    if not ok:
+        logger.error('单元测试失败:\n%s', proc.stderr[-2000:])
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description='生产验收闸门')
     ap.add_argument('--variant', choices=['base', 'l1', 'l1l2'], default='l1l2',
@@ -131,12 +180,10 @@ def main():
     args = ap.parse_args()
     setup_logging()
 
-    cash_yield = PROD_CASH_YIELD if args.variant in ('l1', 'l1l2') else 0.02
-    use_gold = args.variant == 'l1l2'
-
     print('=' * 78)
     print(f'生产验收闸门  MA{PROD_FAST}/{PROD_SLOW}  股票池 {len(DEFAULT_POOL)} 只  变体={args.variant}')
-    print(f'现金收益 {cash_yield:.1%}' + (f'  黄金底仓 {GOLD_WEIGHT:.0%} ({GOLD_ETF})' if use_gold else ''))
+    print(f'现金收益 {PROD_CASH_YIELD if args.variant in ("l1", "l1l2") else 0.02:.1%}'
+          + (f'  黄金底仓 {GOLD_WEIGHT:.0%} ({GOLD_ETF})' if args.variant == 'l1l2' else ''))
     print(f'样本内 {EVAL_IN[0]}~{EVAL_IN[1]}   样本外 {EVAL_OUT[0]}~{EVAL_OUT[1]}')
     print('=' * 78)
 
@@ -144,53 +191,22 @@ def main():
     a1 = True if args.skip_tests else check_unit_tests()
     print(f"\n[A1] 单元测试全绿            : {'跳过' if args.skip_tests else ('PASS' if a1 else 'FAIL')}")
 
-    # ---- 数据加载 (一次, 供所有回测复用) ----
+    # ---- 数据加载 ----
     print(f'\n加载行情 ({HISTORY_START} 起, 窗口外仅预热)...')
-    data = load_pool(DEFAULT_POOL, start_date=HISTORY_START)
-    g = MarketGate(ma_window=20, min_return=-0.05, use_momentum_filter=True)
-    idx = g.load_index_data(start_date=HISTORY_START)
-    if idx is None or len(data) < 8:
-        print(f'FATAL: 数据不足 (股票 {len(data)} 只, 指数 {"无" if idx is None else "有"})')
-        return 1
+    data, idx = load_experiment_data()
     print(f'可用: {len(data)} 只股票, 指数 {len(idx)} 根K线')
 
-    gold_close = None
-    if use_gold:
-        try:
-            gold = DataSource(use_cache=True).get_etf_daily(GOLD_ETF, start_date=HISTORY_START)
-            gold_close = gold['close']
-            print(f'黄金ETF {GOLD_ETF}: {len(gold_close)} 根K线, '
-                  f'{gold_close.index[0].date()} ~ {gold_close.index[-1].date()}')
-        except Exception as e:
-            print(f'FATAL: 黄金ETF数据获取失败, l1l2 无法验收: {e}')
-            return 1
+    gold_close = load_gold() if args.variant == 'l1l2' else None
+    if gold_close is not None:
+        print(f'黄金ETF {GOLD_ETF}: {len(gold_close)} 根K线, '
+              f'{gold_close.index[0].date()} ~ {gold_close.index[-1].date()}')
 
-    def run_blended(start=None, end=None):
-        """统一回测入口: 按变体决定现金收益与是否混合黄金腿"""
-        m, eq = run(data, idx, PROD_FAST, PROD_SLOW, start, end,
-                    cash_yield=cash_yield, return_equity=True)
-        if use_gold:
-            eq = blend_with_gold(eq, gold_close, GOLD_WEIGHT)
-            m = blend_metrics(m, eq)
-        return m, eq
-
-    # ---- 三段回测 ----
-    print('\n回测: 全样本 / 样本内 / 样本外 ...')
-    m_all, _ = run_blended()
-    m_in, _ = run_blended(*EVAL_IN)
-    m_out, _ = run_blended(*EVAL_OUT)
-
-    # ---- 滚动 4 段 ----
-    print('回测: 滚动 4 段 ...')
-    eval_dates = [d for d in idx.index if d >= pd.Timestamp('2018-01-01')]
-    n = len(eval_dates)
-    folds = []
-    for i in range(4):
-        s = eval_dates[i * n // 4]
-        e = eval_dates[min((i + 1) * n // 4 - 1, n - 1)]
-        fm, _ = run_blended(s, e)
-        folds.append({'start': str(pd.Timestamp(s).date()),
-                      'end': str(pd.Timestamp(e).date()), **fm})
+    # ---- 三段回测 + 滚动 4 段 ----
+    print('\n回测: 全样本 / 样本内 / 样本外 / 滚动4段 ...')
+    m_all, _ = run_l1l2(data, idx, gold_close, variant=args.variant)
+    m_in, _ = run_l1l2(data, idx, gold_close, *EVAL_IN, variant=args.variant)
+    m_out, _ = run_l1l2(data, idx, gold_close, *EVAL_OUT, variant=args.variant)
+    folds = rolling_folds(data, idx, gold_close, variant=args.variant)
 
     # ---- 样本外基准 (等权买入持有, 同窗口) ----
     bench = equal_weight_benchmark(data, start=EVAL_OUT[0], end=EVAL_OUT[1])
@@ -259,9 +275,9 @@ def main():
         'created_at': datetime.now().isoformat(timespec='seconds'),
         'variant': args.variant,
         'preregistration': {
-            'cash_yield': cash_yield,
-            'gold_etf': GOLD_ETF if use_gold else None,
-            'gold_weight': GOLD_WEIGHT if use_gold else 0.0,
+            'cash_yield': PROD_CASH_YIELD if args.variant in ('l1', 'l1l2') else 0.02,
+            'gold_etf': GOLD_ETF if args.variant == 'l1l2' else None,
+            'gold_weight': GOLD_WEIGHT if args.variant == 'l1l2' else 0.0,
             'note': '参数于 2026-11-06 预注册 (见 production_gate.py 头部注释), 阈值不变',
         },
         'strategy': f'MA{PROD_FAST}/{PROD_SLOW} + MarketGate(20, -5%)',
