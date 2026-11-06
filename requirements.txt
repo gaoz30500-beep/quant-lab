@@ -1,0 +1,10 @@
+# 主链路依赖 (main.py / portfolio / optimize_trend / validate_trend / fund_rules_backtest)
+pandas>=1.5.0
+numpy>=1.23.0
+matplotlib>=3.6.0
+akshare>=1.10.0
+
+# 以下模块目前未接入主链路, 仅它们自身需要额外依赖, 主链路不需要:
+#   monitoring_system.py  -> seaborn, plotly, statsmodels
+#   strategy_validator.py -> scipy, seaborn
+# 若要运行这两个模块, 自行安装: pip install scipy seaborn plotly statsmodels
