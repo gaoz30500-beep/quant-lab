@@ -90,3 +90,4 @@ python -m unittest discover -s tests -v
 - 分红送股只体现在复权价格里，没有单独的现金分红流水与再投资时点。
 - 基准为等权买入持有，未做行业中性或市值加权基准。
 - 无 CI，测试本地跑；参数网格仍是网格搜索 + 双段一致性，未做正式 walk-forward 再拟合。
+# quant-lab
