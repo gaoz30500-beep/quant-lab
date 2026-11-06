@@ -25,13 +25,17 @@ EVAL_IN = ('2018-01-01', '2022-12-31')
 EVAL_OUT = ('2023-01-01', '2026-10-31')
 
 
-def run(data, idx, fast, slow, start=None, end=None):
+def run(data, idx, fast, slow, start=None, end=None, cash_yield=0.02,
+        return_equity=False):
     """
     在 [start, end] 评估, 指标预热在窗口之外完成
 
     旧写法先按 start 切数据再算信号: MA150 每段开头要重新累积 150 根 K 线,
     段首数月被动空仓, 在下跌段会系统性躲过行情, 从而高估稳定性。
     现在把完整历史交给引擎, 由 eval_start 决定从哪天开始交易。
+
+    cash_yield: 闲置资金年化 (默认 0.02 与 BacktestConfig 一致, 不改变现有口径)
+    return_equity: True 时返回 (metrics, equity_curve) — 供混合底仓等二次加工
     """
     eval_start = pd.Timestamp(start) if start else None
     eval_end = pd.Timestamp(end) if end else None
@@ -48,6 +52,7 @@ def run(data, idx, fast, slow, start=None, end=None):
         stop_loss_pct=0.08,
         take_profit_pct=0.0,        # 0 = 关闭固定止盈
         trailing_stop_pct=0.0,
+        cash_yield=cash_yield,
     )
 
     def factory(symbol):
@@ -62,6 +67,8 @@ def run(data, idx, fast, slow, start=None, end=None):
         trading_days=idx.index if idx is not None else None,
         eval_start=eval_start,
     ).run()
+    if return_equity:
+        return result.metrics, result.equity_curve
     return result.metrics
 
 
