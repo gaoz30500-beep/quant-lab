@@ -15,6 +15,7 @@
 ```bat
 python main.py portfolio --start 20180101 --mode trend      :: 组合回测 + 等权基准对比
 python main.py portfolio --start 20180101 --mode mean_reversion
+python production_gate.py                                   :: 生产验收闸门 (红灯=不可实盘)
 python clean_cache.py                                        :: 清缓存 (如需强制重拉)
 ```
 
@@ -69,6 +70,7 @@ PortfolioEngine(data_with_history, factory, config,
 | `metrics.py` | 绩效指标 |
 | `portfolio.py` / `optimize_*.py` / `validate_trend.py` / `etf_portfolio.py` / `capital_scaling.py` / `fund_rules_backtest.py` | 回测与研究报告脚本 |
 | `logging_setup.py` | 统一分级日志（入口调 `setup_logging()`，模块用 `get_logger(__name__)`） |
+| `production_gate.py` | 生产验收闸门：可信/稳/回报 8 项硬指标，红灯禁止实盘 |
 | `clean_cache.py` | 缓存清理工具（`--symbol` 过滤 / `--dry-run` 预览） |
 | `tests/` | 合成数据 golden master + 规则单测 + 数据层边界测试（41 个，全离线） |
 | `research/` | **未接入主链路**的实验模块（见其 README，勿从主链路 import） |
