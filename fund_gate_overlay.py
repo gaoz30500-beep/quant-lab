@@ -54,9 +54,17 @@ RESULTS_DIR = Path(__file__).parent / 'results'
 
 
 def category_composite(nav_panel: pd.DataFrame, codes) -> pd.Series:
-    """类别复合净值: 成员各自归一到 1 后取均值 (动态处理成立先后)"""
+    """
+    类别复合净值: 成员各自归一到 1 后取均值 (动态处理成立先后)
+
+    关键: 先 ffill 再平均。各基金净值公布时点不一致 (尤其 QDII 滞后、
+    晚间批量公布), 若不填充, 面板末行/停牌日的均值会因"当天谁已公布"
+    而跳变, 造成闸门误翻转 (2026-11-10 实际发生: A股权益被误判离场)。
+    未公布 = 暂按最后已知净值计, 公布后自然修正。
+    """
     members = [c for c in codes if c in nav_panel.columns]
-    norm = nav_panel[members].div(nav_panel[members].dropna().iloc[0])
+    filled = nav_panel[members].ffill()
+    norm = filled.div(filled.dropna().iloc[0])
     return norm.mean(axis=1, skipna=True)
 
 
