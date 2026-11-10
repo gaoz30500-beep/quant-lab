@@ -325,8 +325,86 @@ def run_forecast(symbol: str = '000001', start: str = '20100101',
             'strategy': s_pos, 'benchmark': s_bm, 'acc': acc, 'base_up': base_up}
 
 
+def run_fund_forecast(code: str):
+    """
+    场外基金净值概率预测 (指数版方法论的移植)
+
+    基金只有净值(无高低开), 用 open=high=low=close=nav 构造面板,
+    特征/分档/胜率统计逻辑与指数版完全一致 (严格因果, shift(1))。
+
+    诚实披露:
+    - 单只基金历史短 (多数 2-4 年), 分档样本少, 大概率回退到全样本胜率,
+      概率的置信度远低于指数版 (指数有 15 年数据)
+    - 输出是"倾向"不是"预测", 不能覆盖闸门规则的趋势判断
+    """
+    from fund_rules_backtest import get_nav
+
+    print('=' * 64)
+    print(f'基金净值概率预测  代码={code}')
+    print('=' * 64)
+
+    nav = get_nav(code)
+    df = pd.DataFrame({'open': nav, 'high': nav, 'low': nav, 'close': nav})
+    print(f'数据: {df.index[0].date()} ~ {df.index[-1].date()}, {len(df)} 条净值')
+    if len(df) < 300:
+        print('警告: 历史不足 300 条, 特征预热不够, 结果仅供参考')
+
+    feats = build_features(df)
+    score = composite_score(feats)
+    bucket = bucketize(score)
+    fwd1, y1 = forward_return(df, 1)
+    fwd20, y20 = forward_return(df, 20)
+    p1, n1 = _bucket_stats(bucket, y1, 1)
+    p20, n20 = _bucket_stats(bucket, y20, 20)
+    exp20, _ = _bucket_stats(bucket, fwd20, 20)
+
+    i = len(df) - 1
+    print('\n【下一交易日】')
+    print(f'  P(上涨) = {_fmt_pct(p1.iloc[i])}   方向 = {_direction_label(p1.iloc[i])}   '
+          f'同档历史样本 n={int(n1.iloc[i]) if not pd.isna(n1.iloc[i]) else 0}')
+    print(f'  当前复合趋势得分 = {score.iloc[i]:+.2f}  分档 = '
+          f'{int(bucket.iloc[i]) if not pd.isna(bucket.iloc[i]) else -1}/4')
+
+    print('\n【未来 20 个交易日】')
+    print(f'  P(上涨) = {_fmt_pct(p20.iloc[i])}   条件期望收益 = {_fmt_pct(exp20.iloc[i])}   '
+          f'同档样本 n={int(n20.iloc[i]) if not pd.isna(n20.iloc[i]) else 0}')
+
+    # 历史命中率 (全可用区间, 样本小要打折看)
+    mask1 = p1.notna() & y1.notna()
+    if mask1.sum() > 30:
+        hit1 = ((p1 > 0.5) == (y1 == 1))
+        acc = hit1[mask1].mean()
+        base_up = (y1[mask1] == 1).mean()
+        print(f'\n【历史命中率 (全部可用数据, n={int(mask1.sum())}, 样本小置信度低)】')
+        print(f'  模型命中率 = {acc:.1%}   基准(一直看涨) = {base_up:.1%}')
+    else:
+        print('\n【历史命中率】有效样本不足, 无法评估')
+
+    # 趋势状态对照 (闸门视角)
+    ma20 = nav.rolling(20).mean().iloc[-1]
+    ma60 = nav.rolling(60).mean().iloc[-1] if len(nav) >= 60 else float('nan')
+    last = float(nav.iloc[-1])
+    trend = '趋势完好(MA60上方)' if last > ma60 else '趋势破坏(MA60下方, 闸门规则=离场)'
+    print(f'\n【趋势状态】净值 {last:.4f}, 距MA20 {last/ma20-1:+.2%}, '
+          f'距MA60 {last/ma60-1:+.2%} -> {trend}')
+    print('\n提醒: 短期概率与趋势判断冲突时, 以闸门规则为准 (概率管仓位轻重, 趋势管去留)。')
+    return {'p1': p1.iloc[i], 'p20': p20.iloc[i], 'exp20': exp20.iloc[i]}
+
+
 def main():
-    run_forecast()
+    import argparse
+    ap = argparse.ArgumentParser(description='趋势概率预测 (指数/基金)')
+    ap.add_argument('--fund', help='场外基金代码 (如 018036), 用净值做概率预测')
+    ap.add_argument('--symbol', default='000001', help='指数代码, 默认上证指数')
+    ap.add_argument('--start', default='20100101')
+    ap.add_argument('--oos', default='20180101', help='样本外起点')
+    ap.add_argument('--vol-target', type=float, default=0.12, help='目标年化波动')
+    args = ap.parse_args()
+    if args.fund:
+        run_fund_forecast(args.fund)
+    else:
+        run_forecast(symbol=args.symbol, start=args.start,
+                     oos_start=args.oos, vol_target=args.vol_target)
 
 
 if __name__ == '__main__':
