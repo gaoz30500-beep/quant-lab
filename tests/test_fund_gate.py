@@ -39,17 +39,21 @@ class TestCategoryComposite(unittest.TestCase):
         # 关键: 相邻两天变化平滑 (单日变化 < 1%), 不允许因成员缺失误跳
         self.assertLess(abs(comp.iloc[4] / comp.iloc[3] - 1), 0.01)
 
-    def test_pre_inception_stays_nan(self):
-        # 成员成立前的日期不应被回填 (ffill 只向后填)
+    def test_pre_inception_not_backfilled(self):
+        # 成员成立前的日期不应被"回填" (ffill 只向后填, 不能把未来净值填到过去)
         idx = pd.bdate_range('2024-01-01', periods=4)
         panel = pd.DataFrame({
             'A': [1.0, 1.01, 1.02, 1.03],
             'B': [np.nan, np.nan, 2.0, 2.02],   # B 第3天才成立
         }, index=idx)
         comp = category_composite(panel, ['A', 'B'])
-        self.assertTrue(np.isnan(comp.iloc[0]))
-        self.assertTrue(np.isnan(comp.iloc[1]))
-        self.assertFalse(np.isnan(comp.iloc[2]))
+        # 归一基准 = 首个全员有值日 (第3天): A=1.02, B=2.0
+        # 成立前: 只有 A 参与 (skipna), B 不得被回填
+        # 若错误地 bfill, 第1天会变成 (1.0/1.02 + 2.0/2.0)/2 = 0.9902
+        self.assertAlmostEqual(comp.iloc[0], 1.0 / 1.02, places=6)
+        self.assertAlmostEqual(comp.iloc[1], 1.01 / 1.02, places=6)
+        # 成立后: A、B 共同参与
+        self.assertAlmostEqual(comp.iloc[2], (1.02 / 1.02 + 2.0 / 2.0) / 2, places=6)
 
     def test_real_categories_shape(self):
         # 真实类别定义完整性 (防止 CATEGORIES 被误改)
